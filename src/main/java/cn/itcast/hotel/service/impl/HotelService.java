@@ -9,28 +9,39 @@ import cn.itcast.hotel.service.IHotelService;
 import com.alibaba.fastjson.JSON;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.apache.lucene.search.BooleanQuery;
+import org.elasticsearch.action.delete.DeleteRequest;
+import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.common.geo.GeoPoint;
 import org.elasticsearch.common.unit.DistanceUnit;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.query.functionscore.FunctionScoreQueryBuilder;
 import org.elasticsearch.index.query.functionscore.ScoreFunctionBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
+import org.elasticsearch.search.aggregations.AggregationBuilders;
+import org.elasticsearch.search.aggregations.Aggregations;
+import org.elasticsearch.search.aggregations.bucket.terms.Terms;
 import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
 import org.elasticsearch.search.fetch.subphase.highlight.HighlightField;
 import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.search.suggest.Suggest;
+import org.elasticsearch.search.suggest.SuggestBuilder;
+import org.elasticsearch.search.suggest.SuggestBuilders;
+import org.elasticsearch.search.suggest.completion.CompletionSuggestion;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -63,6 +74,114 @@ public class HotelService extends ServiceImpl<HotelMapper, Hotel> implements IHo
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    @Override
+    public Map<String, List<String>> filters(RequestParams requestParams) throws IOException {
+        //1。准备Request
+        SearchRequest request = new SearchRequest("hotel");
+
+        buildBasicSearch(requestParams,request);
+        //2.准备DSL
+        request.source().size(0);
+        buildAggregation(request);
+
+        //3.发出请求
+        SearchResponse response = client.search(request, RequestOptions.DEFAULT);
+
+        //结果处理
+        Aggregations aggregations = response.getAggregations();
+        //创造返回结果集
+        Map<String, List<String>> ret = new HashMap<>();
+
+        List<String> brandList = resultExtracted(aggregations,"brand_agg");
+        ret.put("品牌",brandList);
+        List<String> cityList = resultExtracted(aggregations,"city_agg");
+        ret.put("城市",cityList);
+        List<String> starList = resultExtracted(aggregations,"star_agg");
+        ret.put("星级",brandList);
+
+        return ret;
+    }
+
+    @Override
+    public List<String> getSuggestions(String key) throws IOException {
+        //1.准备Request
+        SearchRequest request = new SearchRequest("hotel");
+        //2.准备DSL
+        request.source().suggest(new SuggestBuilder().addSuggestion(
+                "mySuggestion", SuggestBuilders.completionSuggestion("suggestion")
+                        .prefix(key).skipDuplicates(true).size(10)
+        ));
+        SearchResponse result = client.search(request, RequestOptions.DEFAULT);
+        //4.解析结果
+        Suggest suggest = result.getSuggest();
+        //4.1根据查询补全名称，获取补全结果
+        CompletionSuggestion mySuggestion = suggest.getSuggestion("mySuggestion");
+        //4.2获取options
+        List<String> ret = new ArrayList<>();
+        List<CompletionSuggestion.Entry.Option> options = mySuggestion.getOptions();
+        for (CompletionSuggestion.Entry.Option option : options) {
+            String text = option.getText().toString();
+            ret.add(text);
+        }
+        return ret;
+    }
+
+    @Override
+    public void deleteById(Long id) {
+        DeleteRequest request = new DeleteRequest("hotel",id.toString());
+        try {
+            client.delete(request,RequestOptions.DEFAULT);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void insertById(Long id)  {
+        //0.根据id查询数据
+        Hotel hotel = this.getById(id);
+        HotelDoc hotelDoc = new HotelDoc(hotel);
+
+        //1.准备request对象
+        IndexRequest request = new IndexRequest("hotel").id(hotel.getId()+"");
+        //2.准备JSON文档
+        request.source(JSON.toJSONString(hotelDoc), XContentType.JSON);
+        //3.发送请求
+        try {
+            client.index(request,RequestOptions.DEFAULT);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+
+    }
+
+    private List<String> resultExtracted(Aggregations aggregations,String conditions) {
+        Terms brandTerms = aggregations.get(conditions);
+        List<? extends Terms.Bucket> brandBuckets = brandTerms.getBuckets();
+        List<String> brandList = new ArrayList<>();
+        for (Terms.Bucket bucket : brandBuckets) {
+            String key = bucket.getKeyAsString();
+            brandList.add(key);
+        }
+        return brandList;
+    }
+
+    private void buildAggregation(SearchRequest request) {
+        request.source().aggregation(AggregationBuilders.
+                terms("brand_agg").
+                field("brand")
+                .size(100));
+        request.source().aggregation(AggregationBuilders.
+                terms("city_agg").
+                field("city")
+                .size(100));
+        request.source().aggregation(AggregationBuilders.
+                terms("star_agg").
+                field("starName")
+                .size(100));
     }
 
     private void buildBasicSearch(RequestParams requestParams, SearchRequest request) {
